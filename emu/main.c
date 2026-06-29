@@ -47,7 +47,7 @@ static void bp_del(int idx) {
 /* ─── syscall handler ─────────────────────────────────────────── */
 void cpu_syscall(S64CPU *cpu, u8 num) {
     switch (num) {
-    case 1: { /* write(fd, buf, len) */
+    case SYS_WRITE: { /* write(fd, buf, len) */
         u64 fd  = cpu->regs[0];
         u64 buf = cpu->regs[1];
         u64 len = cpu->regs[2];
@@ -58,7 +58,7 @@ void cpu_syscall(S64CPU *cpu, u8 num) {
         cpu->regs[0] = len;
         break;
     }
-    case 60: /* exit(code) */
+    case SYS_EXIT: /* exit(code) */
         printf("\n[s64emu] exit(%llu)\n",
                (unsigned long long)cpu->regs[0]);
         cpu->halted = 1;

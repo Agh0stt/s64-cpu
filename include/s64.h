@@ -236,4 +236,12 @@ typedef struct {
 #define S64_FAULT_BAD_ALIGN     3
 #define S64_FAULT_BAD_ADDR      4
 
+/* SABI syscall numbers (SYS instruction, #imm8 selects which).
+ * Implemented today in emu/main.c:cpu_syscall(). This is the only
+ * place the ABI previously existed -- as a comment in a switch
+ * statement -- so it's pulled up here to be discoverable next to the
+ * opcode/fault tables instead of buried in the emulator source. */
+#define SYS_WRITE   1   /* write(fd, buf, len) -- R0=fd R1=buf R2=len */
+#define SYS_EXIT    60  /* exit(code)          -- R0=code */
+
 #endif /* S64_H */
