@@ -9,16 +9,6 @@ static const char *sect_order[] = {
     ".text", ".rodata", ".data", ".bss", NULL
 };
 
-typedef struct {
-    const char *name;
-    uint8_t    *data;
-    uint32_t    size;
-    uint64_t    virt_addr;
-    uint8_t     flags;
-} MergedSection;
-
-#define MAX_MERGED 16
-
 static int build_merged(ObjFile *objs, int obj_count,
                         MergedSection *out, int *out_count,
                         uint64_t base) {
@@ -76,6 +66,7 @@ static int build_merged(ObjFile *objs, int obj_count,
 
 /* ─── patch symbol values with final virt addrs ───────────────── */
 static void patch_sym_addrs(ObjFile *objs, int obj_count, SymMap *sm) {
+    (void)obj_count;
     for (int i = 0; i < sm->count; i++) {
         LinkSym *ls = &sm->syms[i];
         if (!ls->defined || ls->obj_idx < 0) continue;
@@ -86,13 +77,22 @@ static void patch_sym_addrs(ObjFile *objs, int obj_count, SymMap *sm) {
     }
 }
 
+/* ─── compute final layout once, before map/emit ──────────────── */
+int emit_compute_layout(ObjFile *objs, int obj_count, SymMap *sm,
+                         uint64_t base, Layout *out) {
+    out->count = 0;
+    if (build_merged(objs, obj_count, out->sections, &out->count, base))
+        return -1;
+    patch_sym_addrs(objs, obj_count, sm);
+    return 0;
+}
+
 /* ─── emit .x64 SXF ──────────────────────────────────────────── */
 int emit_x64(ObjFile *objs, int obj_count, SymMap *sm,
-             const char *outpath, LinkOpts *opts) {
-    MergedSection merged[MAX_MERGED];
-    int mc = 0;
-    if (build_merged(objs, obj_count, merged, &mc, opts->base)) return -1;
-    patch_sym_addrs(objs, obj_count, sm);
+             const char *outpath, LinkOpts *opts, Layout *layout) {
+    (void)objs; (void)obj_count;
+    MergedSection *merged = layout->sections;
+    int mc = layout->count;
 
     /* find entry point */
     const char *esym = opts->entry_sym ? opts->entry_sym : "_start";
@@ -152,9 +152,6 @@ int emit_x64(ObjFile *objs, int obj_count, SymMap *sm,
 
     fclose(f);
 
-    /* free merged */
-    for (int i = 0; i < mc; i++) free(merged[i].data);
-
     printf("ld64: linked '%s'  entry=0x%llx  %d section(s)\n",
            outpath, (unsigned long long)entry_addr, mc);
     return 0;
@@ -162,10 +159,10 @@ int emit_x64(ObjFile *objs, int obj_count, SymMap *sm,
 
 /* ─── emit flat binary ────────────────────────────────────────── */
 int emit_flat(ObjFile *objs, int obj_count,
-              const char *outpath, LinkOpts *opts) {
-    MergedSection merged[MAX_MERGED];
-    int mc = 0;
-    if (build_merged(objs, obj_count, merged, &mc, opts->base)) return -1;
+              const char *outpath, LinkOpts *opts, Layout *layout) {
+    (void)objs; (void)obj_count; (void)opts;
+    MergedSection *merged = layout->sections;
+    int mc = layout->count;
 
     FILE *f = fopen(outpath, "wb");
     if (!f) { perror(outpath); return -1; }
@@ -178,14 +175,12 @@ int emit_flat(ObjFile *objs, int obj_count,
     }
     fclose(f);
 
-    for (int i = 0; i < mc; i++) free(merged[i].data);
-
     printf("ld64: flat binary '%s'  %u bytes\n", outpath, total);
     return 0;
 }
 
 /* ─── print linker map ────────────────────────────────────────── */
-void emit_map(ObjFile *objs, int obj_count, SymMap *sm) {
+void emit_map(ObjFile *objs, int obj_count, SymMap *sm, Layout *layout) {
     printf("\n=== S64 linker map ===\n");
     for (int oi = 0; oi < obj_count; oi++) {
         ObjFile *obj = &objs[oi];
@@ -203,6 +198,24 @@ void emit_map(ObjFile *objs, int obj_count, SymMap *sm) {
         LinkSym *s = &sm->syms[i];
         printf("  0x%016llx  %s\n",
                (unsigned long long)s->value, s->name);
+    }
+
+    if (layout && layout->count > 0) {
+        printf("\nmerged layout:\n");
+        for (int i = 0; i < layout->count; i++) {
+            MergedSection *ms = &layout->sections[i];
+            uint64_t end = ms->virt_addr + ms->size;
+            printf("  %-12s  vaddr=0x%016llx  size=%u  end=0x%016llx\n",
+                   ms->name, (unsigned long long)ms->virt_addr,
+                   ms->size, (unsigned long long)end);
+            if (i + 1 < layout->count) {
+                uint64_t next_addr = layout->sections[i + 1].virt_addr;
+                if (next_addr != end) {
+                    printf("    ^ %llu byte(s) alignment padding before next section\n",
+                           (unsigned long long)(next_addr - end));
+                }
+            }
+        }
     }
     printf("\n");
 }

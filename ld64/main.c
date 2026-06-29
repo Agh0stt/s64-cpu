@@ -103,9 +103,6 @@ int main(int argc, char **argv) {
         free(objs); return 1;
     }
 
-    /* print map if requested */
-    if (opt_map) emit_map(objs, input_count, &sm);
-
     /* emit output */
     LinkOpts opts = {
         .base      = base,
@@ -115,11 +112,26 @@ int main(int argc, char **argv) {
         .mode32    = opt_s32,
     };
 
+    /* compute final layout (section addresses + patched symbol values)
+     * exactly once, BEFORE printing the map, so --map shows real,
+     * final addresses instead of pre-link zeros. */
+    Layout layout;
+    if (emit_compute_layout(objs, input_count, &sm, opts.base, &layout)) {
+        fprintf(stderr, "ld64: layout computation failed\n");
+        free(objs); return 1;
+    }
+
+    /* print map if requested */
+    if (opt_map) emit_map(objs, input_count, &sm, &layout);
+
     int rc;
     if (opt_flat)
-        rc = emit_flat(objs, input_count, output, &opts);
+        rc = emit_flat(objs, input_count, output, &opts, &layout);
     else
-        rc = emit_x64(objs, input_count, &sm, output, &opts);
+        rc = emit_x64(objs, input_count, &sm, output, &opts, &layout);
+
+    /* free merged section data now that both map and emit are done */
+    for (int i = 0; i < layout.count; i++) free(layout.sections[i].data);
 
     /* cleanup */
     for (int i = 0; i < input_count; i++) obj_free(&objs[i]);
