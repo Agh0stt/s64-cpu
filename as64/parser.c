@@ -51,6 +51,115 @@ static uint32_t sect_pc(Parser *p) {
     return s ? s->size : 0;
 }
 
+/* ─── instruction-word patch helpers ──────────────────────────── */
+static uint32_t word_read(uint8_t *buf, uint32_t off) {
+    return (uint32_t)buf[off]
+         | (uint32_t)buf[off + 1] << 8
+         | (uint32_t)buf[off + 2] << 16
+         | (uint32_t)buf[off + 3] << 24;
+}
+
+static void word_write(uint8_t *buf, uint32_t off, uint32_t word) {
+    buf[off]     = word & 0xFF;
+    buf[off + 1] = (word >> 8)  & 0xFF;
+    buf[off + 2] = (word >> 16) & 0xFF;
+    buf[off + 3] = (word >> 24) & 0xFF;
+}
+
+/* Patch the imm8 field (bits 8:1, per ENCODE_INSTR in s64.h) of the
+ * instruction word at buf+off, leaving every other field (op/rd/rs1/rs2/M)
+ * untouched. */
+static void patch_imm8(uint8_t *buf, uint32_t off, uint8_t imm) {
+    uint32_t word = word_read(buf, off);
+    word = (word & ~(0xFFu << 1)) | ((uint32_t)imm << 1);
+    word_write(buf, off, word);
+}
+
+/* ─── backpatch relocations whose symbol is now known ─────────────
+ * Runs after the single parse pass + symtab_resolve(). For every
+ * relocation whose symbol turned out to be defined SOMEWHERE in this
+ * file (forward or backward reference -- doesn't matter, the whole
+ * file has been scanned by now), writes the real resolved bytes into
+ * the section data and marks the reloc as patched so write_o64() will
+ * skip it. Relocations against symbols that are declared-but-not-
+ * locally-defined (.extern) are left unpatched on purpose -- those
+ * survive into the .o64 file for ld64 to resolve at link time.
+ *
+ * This is the fix for a real bug: previously, ANY reloc -- including
+ * ordinary forward references like `MOVI R1, target` where `target:`
+ * is defined later in the same file -- silently kept its placeholder
+ * imm=0 forever, with zero error or warning. symtab_resolve() only
+ * ever checked whether the symbol existed; nothing ever wrote the
+ * resolved value back into the instruction bytes. */
+static void backpatch_relocs(Parser *p) {
+    for (int i = 0; i < p->syms.reloc_count; i++) {
+        Reloc *r = &p->syms.relocs[i];
+        if (r->patched) continue;
+
+        Symbol *s = symtab_find(&p->syms, r->sym_name);
+        if (!s || !s->defined) continue; /* extern / link-time: leave alone */
+
+        if (r->section < 0 || r->section >= p->sect_count) {
+            fprintf(stderr, "as64: backpatch: bad section index for '%s'\n",
+                    r->sym_name);
+            p->errors++;
+            continue;
+        }
+        Section *sect = &p->sections[r->section];
+        uint64_t target = s->value;
+
+        switch (r->type) {
+        case RELOC_ABS:
+            if (r->offset + 4 > sect->size) {
+                fprintf(stderr, "as64: backpatch: offset out of bounds for '%s'\n",
+                        r->sym_name);
+                p->errors++;
+                break;
+            }
+            /* Same truncate-to-low-byte semantics as ld64/reloc.c's
+             * absolute case -- this intentionally only carries 8 bits.
+             * Anything needing a full address must use LA, not a plain
+             * MOVI/MOVW with a label operand. */
+            patch_imm8(sect->data, (uint32_t)r->offset, (uint8_t)(target & 0xFF));
+            r->patched = 1;
+            break;
+
+        case RELOC_WIDE: {
+            /* 4 consecutive instruction words (16 bytes): MOVI carries
+             * the MSB (bits 31:24 of target), the three MOVWs carry the
+             * next three bytes down to the LSB, matching the LA chain
+             * semantics: Rd = imm; Rd = (Rd<<8)|imm; Rd = (Rd<<8)|imm; ...
+             * Always exactly 4 words/16 bytes regardless of value --
+             * fixed-length by design, see LA pseudo-op rationale. */
+            if (r->offset + 16 > sect->size) {
+                fprintf(stderr, "as64: backpatch: wide reloc out of bounds for '%s'\n",
+                        r->sym_name);
+                p->errors++;
+                break;
+            }
+            uint8_t bytes[4] = {
+                (uint8_t)((target >> 24) & 0xFF),
+                (uint8_t)((target >> 16) & 0xFF),
+                (uint8_t)((target >> 8)  & 0xFF),
+                (uint8_t)(target         & 0xFF),
+            };
+            for (int w = 0; w < 4; w++)
+                patch_imm8(sect->data, (uint32_t)r->offset + (uint32_t)w * 4, bytes[w]);
+            r->patched = 1;
+            break;
+        }
+
+        case RELOC_PCREL:
+            /* Intra-file PC-relative is left to ld64 at link time today,
+             * same as before -- the final linked virtual address isn't
+             * known yet at as64 time even for same-file symbols, since
+             * as64 doesn't know what base ld64 will use. Out of scope
+             * for this fix; unchanged behavior. */
+            break;
+        }
+    }
+}
+
 /* ─── parser init/free ────────────────────────────────────────── */
 int parser_init(Parser *p, const char *src, size_t len, const char *filename) {
     memset(p, 0, sizeof(Parser));
@@ -351,6 +460,13 @@ int parser_run(Parser *p) {
     /* resolve forward references */
     int unres = symtab_resolve(&p->syms);
     if (unres > 0) p->errors += unres;
+
+    /* write real addresses into section bytes for every relocation whose
+     * symbol is locally defined (fixes the forward-reference bug --
+     * previously this step didn't exist at all). Relocations against
+     * .extern symbols are deliberately left unpatched here; write_o64()
+     * serializes those into the .o64 file for ld64 to resolve. */
+    backpatch_relocs(p);
 
     return p->errors;
 }

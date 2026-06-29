@@ -49,8 +49,22 @@ void symtab_add_global(SymTable *st, const char *name) {
 }
 
 void symtab_add_extern(SymTable *st, const char *name) {
-    if (!symtab_find(st, name))
-        symtab_define(st, name, SYM_EXTERN, 0, -1);
+    if (symtab_find(st, name)) return; /* already known */
+    if (st->sym_count >= MAX_SYMBOLS) {
+        fprintf(stderr, "as64: symbol table full\n");
+        return;
+    }
+    Symbol *s = &st->syms[st->sym_count++];
+    strncpy(s->name, name, sizeof(s->name) - 1);
+    s->type    = SYM_EXTERN;
+    s->value   = 0;
+    s->section = -1;
+    s->defined = 0;  /* known to exist, but NOT locally defined -- any
+                      * reloc against this symbol must survive into the
+                      * .o64 file for ld64 to resolve at link time. The
+                      * old code called symtab_define() here, which
+                      * unconditionally set defined=1, silently resolving
+                      * every extern reference to address 0. */
 }
 
 int symtab_add_reloc(SymTable *st, const char *sym,
@@ -69,14 +83,23 @@ int symtab_add_reloc(SymTable *st, const char *sym,
 }
 
 int symtab_resolve(SymTable *st) {
+    /* This only validates that every referenced symbol is at least
+     * KNOWN (locally defined, or declared via .extern). It does NOT
+     * patch any bytes -- that happens in parser.c's backpatch_relocs(),
+     * which has access to the section data buffers and runs right
+     * after this. A symbol that's known but not locally defined
+     * (SYM_EXTERN, defined=0) is not an error here: it's expected to
+     * be resolved later by ld64, and its reloc gets carried into the
+     * .o64 file instead of being patched now. */
     int unresolved = 0;
     for (int i = 0; i < st->reloc_count; i++) {
         Reloc  *r = &st->relocs[i];
         Symbol *s = symtab_find(st, r->sym_name);
-        if (!s || !s->defined) {
+        if (!s) {
             fprintf(stderr, "as64: undefined symbol '%s'\n", r->sym_name);
             unresolved++;
         }
+        /* s && !s->defined (i.e. extern) is fine -- not an error */
     }
     return unresolved;
 }

@@ -40,6 +40,10 @@ typedef struct {
     int         section;
     RelocType   type;
     int         instr_field; /* which field: 0=full imm8, 1=jmpi offset */
+    int         patched;     /* 1 once backpatch_relocs() has written the
+                              * real bytes (intra-file case) -- write_o64()
+                              * skips these; only unpatched (extern) relocs
+                              * get serialized into the .o64 reloc table. */
 } Reloc;
 
 typedef struct {

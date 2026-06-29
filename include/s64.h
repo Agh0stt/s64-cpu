@@ -176,7 +176,8 @@ typedef int64_t   s64_t;
 #define SXF_SECT_FLAG_W     0x02
 #define SXF_SECT_FLAG_X     0x04
 
-/* SXF file header — 32 bytes */
+/* SXF file header — 36 bytes (NOT 32 -- long-standing doc error,
+ * confirmed by direct struct measurement in an earlier session). */
 typedef struct __attribute__((packed)) {
     u8  magic[3];           /* "SXF" */
     u8  version;            /* SXF_VERSION */
@@ -187,7 +188,12 @@ typedef struct __attribute__((packed)) {
     u16 section_count;
     u8  _pad1[2];
     u64 symtab_offset;      /* offset to symbol table in file */
-    u8  _reserved[8];
+    /* Previously an 8-byte _reserved blob. Repurposed (on-disk size
+     * unchanged) to carry the relocation table location -- SXFReloc
+     * was defined below but had nowhere to live in the file; write_o64()
+     * silently dropped relocations and obj_load() never looked for them. */
+    u32 reloctab_offset;    /* offset to relocation table in file (0 = none) */
+    u32 reloc_count;        /* number of SXFReloc entries at that offset */
 } SXFHeader;
 
 /* SXF section descriptor — 32 bytes each, immediately after header */
@@ -202,14 +208,20 @@ typedef struct __attribute__((packed)) {
 } SXFSection;
 
 /* SXF relocation entry */
-#define SXF_RELOC_ABS       0x01    /* absolute address */
-#define SXF_RELOC_PCREL     0x02    /* PC-relative */
+#define SXF_RELOC_ABS       0x01    /* absolute address, patches 1 instr word */
+#define SXF_RELOC_PCREL     0x02    /* PC-relative, patches 1 instr word */
+#define SXF_RELOC_WIDE      0x03    /* LA pseudo-op: patches a fixed 4-instruction
+                                      * MOVI+3xMOVW chain (16 bytes) as one unit,
+                                      * MSB-first, one byte of the 64-bit target
+                                      * per instruction's imm8 field. */
 
 typedef struct __attribute__((packed)) {
-    u64 offset;             /* offset in section to patch */
+    u64 offset;             /* byte offset in section to patch */
     u64 symbol_index;       /* index into symbol table */
-    u8  type;               /* SXF_RELOC_ABS or SXF_RELOC_PCREL */
-    u8  _pad[7];
+    u8  type;               /* SXF_RELOC_ABS / SXF_RELOC_PCREL / SXF_RELOC_WIDE */
+    u8  section_index;      /* which section (index into section table) this
+                              * reloc applies to. */
+    u8  _pad[6];
 } SXFReloc;
 
 /* ─── execution mode ──────────────────────────────────────────── */
